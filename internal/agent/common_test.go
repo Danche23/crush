@@ -112,8 +112,8 @@ func testSessionAgent(env fakeEnv, large, small fantasy.LanguageModel, systemPro
 		},
 	}
 	agent := NewSessionAgent(SessionAgentOptions{
-		LargeModel:   largeModel,
-		SmallModel:   smallModel,
+		LargeModel:   csync.NewValue(largeModel),
+		SmallModel:   csync.NewValue(smallModel),
 		SystemPrompt: systemPrompt,
 		IsYolo:       true,
 		Sessions:     env.sessions,

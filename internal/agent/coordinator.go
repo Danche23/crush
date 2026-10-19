@@ -169,6 +169,9 @@ type coordinator struct {
 	mainAgentName string
 	agents        map[string]SessionAgent
 
+	models         sharedModels
+	subAgentModels sharedModels
+
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
 	activeSkills []*skills.Skill // Post-filter: active skills only.
@@ -790,15 +793,16 @@ func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderO
 }
 
 func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
-	large, small, err := c.buildAgentModels(ctx, isSubAgent)
-	if err != nil {
+	if err := c.rebuildModels(ctx); err != nil {
 		return nil, err
 	}
+	models := c.modelsFor(isSubAgent)
+	large := models.large.Get()
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
 	result := NewSessionAgent(SessionAgentOptions{
-		LargeModel:           large,
-		SmallModel:           small,
+		LargeModel:           &models.large,
+		SmallModel:           &models.small,
 		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
@@ -1452,15 +1456,12 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 	return c.updateAgentModels(ctx, agent, name)
 }
 
-// updateAgentModels rebuilds the model and tool configuration for the
-// given agent from the current config.
+// updateAgentModels rebuilds the shared models and the given agent's tools
+// from the current config.
 func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent, name string) error {
-	// build the models again so we make sure we get the latest config
-	large, small, err := c.buildAgentModels(ctx, false)
-	if err != nil {
+	if err := c.rebuildModels(ctx); err != nil {
 		return err
 	}
-	agent.SetModels(large, small)
 
 	agentCfg, ok := c.cfg.Config().Agents[name]
 	if !ok {
@@ -1580,7 +1581,7 @@ func (c *coordinator) waitForInteractiveReauth(ctx context.Context, providerID s
 		return ctx.Err()
 	}
 	// Rebuild models so ModelProvider picks up the fresh credentials.
-	if updateErr := c.UpdateModels(waitCtx); updateErr != nil {
+	if updateErr := c.rebuildModels(waitCtx); updateErr != nil {
 		slog.Error("Failed to update models after re-authentication", "error", updateErr)
 		return updateErr
 	}
@@ -1613,10 +1614,7 @@ func (c *coordinator) refreshOAuth2Token(ctx context.Context, providerCfg config
 		slog.Error("Failed to refresh OAuth token after 401 error", "provider", providerCfg.ID, "error", err)
 		return err
 	}
-	if err := c.UpdateModels(ctx); err != nil {
-		return err
-	}
-	return nil
+	return c.rebuildModels(ctx)
 }
 
 func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg config.ProviderConfig) error {
@@ -1628,11 +1626,7 @@ func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg con
 
 	providerCfg.APIKey = newAPIKey
 	c.cfg.Config().Providers.Set(providerCfg.ID, providerCfg)
-
-	if err := c.UpdateModels(ctx); err != nil {
-		return err
-	}
-	return nil
+	return c.rebuildModels(ctx)
 }
 
 // subAgentParams holds the parameters for running a sub-agent.

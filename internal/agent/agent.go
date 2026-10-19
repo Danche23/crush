@@ -168,7 +168,6 @@ func filterToolsForChannel(agentTools []fantasy.AgentTool, channel string, state
 type SessionAgent interface {
 	Run(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
 	BeginAccepted(sessionID string) *AcceptedRun
-	SetModels(large Model, small Model)
 	SetTools(tools []fantasy.AgentTool)
 	SetSystemPrompt(systemPrompt string)
 	Cancel(sessionID string)
@@ -261,8 +260,10 @@ type sessionAgent struct {
 }
 
 type SessionAgentOptions struct {
-	LargeModel           Model
-	SmallModel           Model
+	// LargeModel and SmallModel are shared with the coordinator, which
+	// rebuilds them when credentials change. Nil means no model.
+	LargeModel           *csync.Value[Model]
+	SmallModel           *csync.Value[Model]
 	SystemPromptPrefix   string
 	SystemPrompt         string
 	IsSubAgent           bool
@@ -280,8 +281,8 @@ func NewSessionAgent(
 	opts SessionAgentOptions,
 ) SessionAgent {
 	return &sessionAgent{
-		largeModel:           csync.NewValue(opts.LargeModel),
-		smallModel:           csync.NewValue(opts.SmallModel),
+		largeModel:           orNoModel(opts.LargeModel),
+		smallModel:           orNoModel(opts.SmallModel),
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:         csync.NewValue(opts.SystemPrompt),
 		isSubAgent:           opts.IsSubAgent,
@@ -2132,11 +2133,6 @@ func (a *sessionAgent) QueuedPromptsList(sessionID string) []string {
 		prompts[i] = call.Prompt
 	}
 	return prompts
-}
-
-func (a *sessionAgent) SetModels(large Model, small Model) {
-	a.largeModel.Set(large)
-	a.smallModel.Set(small)
 }
 
 func (a *sessionAgent) SetTools(tools []fantasy.AgentTool) {
