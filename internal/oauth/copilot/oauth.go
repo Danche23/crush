@@ -17,10 +17,12 @@ import (
 const (
 	clientID = "Iv1.b507a08c87ecfe98"
 
-	deviceCodeURL   = "https://github.com/login/device/code"
-	accessTokenURL  = "https://github.com/login/oauth/access_token"
-	copilotTokenURL = "https://api.github.com/copilot_internal/v2/token"
+	deviceCodeURL  = "https://github.com/login/device/code"
+	accessTokenURL = "https://github.com/login/oauth/access_token"
 )
+
+// copilotTokenURL is a variable so tests can point it at a local server.
+var copilotTokenURL = "https://api.github.com/copilot_internal/v2/token"
 
 var ErrNotAvailable = errors.New("github copilot not available")
 
@@ -173,7 +175,8 @@ func getCopilotToken(ctx context.Context, githubToken string) (*oauth.Token, err
 		return nil, ErrNotAvailable
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("copilot token request failed: %s - %s", resp.Status, string(body))
+		return nil, fmt.Errorf("copilot token request failed: %w",
+			&oauth.TokenExchangeError{StatusCode: resp.StatusCode, Body: string(body)})
 	}
 
 	var result struct {
