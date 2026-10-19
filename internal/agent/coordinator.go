@@ -418,7 +418,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	// retry means the user doesn't need to re-authenticate. AWS SSO is
 	// handled transparently inside OnAuthRefresh, so it needs no post-run
 	// notification here.
-	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && model.OAuth {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,
@@ -1062,12 +1062,14 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		CatwalkCfg: *largeCatwalkModel,
 		ModelCfg:   largeModelCfg,
 		FlatRate:   largeProviderCfg.FlatRate,
+		OAuth:      largeProviderCfg.OAuthToken != nil,
 	}
 	small := Model{
 		Model:      smallModel,
 		CatwalkCfg: *smallCatwalkModel,
 		ModelCfg:   smallModelCfg,
 		FlatRate:   smallProviderCfg.FlatRate,
+		OAuth:      smallProviderCfg.OAuthToken != nil,
 	}
 
 	return large, small, nil
@@ -1700,7 +1702,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	result, err := run()
 	// Notify only if still unauthorized after retry. AWS SSO is handled
 	// transparently inside OnAuthRefresh, so it needs no post-run notice.
-	if err != nil && isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if err != nil && isUnauthorized(err) && c.notify != nil && model.OAuth {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,
