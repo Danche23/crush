@@ -7,13 +7,77 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/tidwall/sjson"
 )
 
-// Hook event name constants.
+// Hook event names. The canonical list lives in config so that config
+// validation can use it; these aliases keep call sites readable.
 const (
-	EventPreToolUse = "PreToolUse"
+	// EventPreToolUse fires before a tool runs. Hooks can allow, deny,
+	// halt, rewrite the input, or add context.
+	EventPreToolUse = config.HookEventPreToolUse
+	// EventPostToolUse fires after a tool succeeds. Hooks can replace
+	// the output, add context, or halt.
+	EventPostToolUse = config.HookEventPostToolUse
+	// EventPostToolUseFailure fires after a tool fails. Hooks can add
+	// context or halt.
+	EventPostToolUseFailure = config.HookEventPostToolUseFailure
+	// EventPermissionRequest fires when a permission prompt is shown.
+	EventPermissionRequest = config.HookEventPermissionRequest
+	// EventPermissionResult fires when a permission prompt is resolved
+	// (granted, denied, or cancelled).
+	EventPermissionResult = config.HookEventPermissionResult
+	// EventSessionStart fires when a session is created or resumed.
+	EventSessionStart = config.HookEventSessionStart
+	// EventSessionEnd fires for the active session when the app exits.
+	EventSessionEnd = config.HookEventSessionEnd
+	// EventTurnStart fires when the agent begins processing a prompt.
+	EventTurnStart = config.HookEventTurnStart
+	// EventTurnEnd fires when the agent finishes a turn.
+	EventTurnEnd = config.HookEventTurnEnd
+	// EventStopFailure fires when a turn ends with a provider error.
+	EventStopFailure = config.HookEventStopFailure
+	// EventInterrupt fires when the user cancels a turn.
+	EventInterrupt = config.HookEventInterrupt
+	// EventPreCompact fires before context compaction. Hooks can block it.
+	EventPreCompact = config.HookEventPreCompact
+	// EventPostCompact fires after context compaction completes.
+	EventPostCompact = config.HookEventPostCompact
 )
+
+// Event is one hook invocation. Name selects which configured hooks run;
+// the remaining fields describe the occasion and only the ones that are
+// set appear in the payload piped to the hook.
+type Event struct {
+	Name      string
+	SessionID string
+
+	// ToolName, ToolInput and ToolUseID describe the tool call for the
+	// tool events (PreToolUse, PostToolUse, PostToolUseFailure,
+	// PermissionRequest, PermissionResult). ToolInput is raw JSON.
+	ToolName  string
+	ToolInput string
+	ToolUseID string
+
+	// ToolResponse is the tool's output (PostToolUse).
+	ToolResponse string
+	// Error describes the failure (PostToolUseFailure, StopFailure).
+	Error string
+	// LastAssistantMessage is the assistant's text for the turn (TurnEnd).
+	LastAssistantMessage string
+	// Decision is the permission outcome (PermissionResult): "granted",
+	// "denied", or "cancelled".
+	Decision string
+	// Source is why the session started (SessionStart): "startup" or
+	// "resume".
+	Source string
+	// Reason is why the session ended (SessionEnd).
+	Reason string
+	// Trigger is why compaction ran (PreCompact, PostCompact): "auto" or
+	// "manual".
+	Trigger string
+}
 
 // HaltExitCode is the exit code that halts the whole turn. 2 blocks the
 // current tool call; 49 sits in the no-man's-land between the
@@ -35,6 +99,7 @@ type HookMetadata struct {
 // HookInfo identifies a single hook that ran and its individual result.
 type HookInfo struct {
 	Name         string `json:"name"`
+	Event        string `json:"event,omitempty"`
 	Matcher      string `json:"matcher,omitempty"`
 	Decision     string `json:"decision"`
 	Halt         bool   `json:"halt,omitempty"`
@@ -85,13 +150,21 @@ type AggregateResult struct {
 	UpdatedInput string     // Merged tool_input JSON (empty if no patches).
 }
 
+// Blocked reports whether any hook denied the action or halted the turn.
+func (a AggregateResult) Blocked() bool {
+	return a.Decision == DecisionDeny || a.Halt
+}
+
 // aggregate merges multiple HookResults into a single AggregateResult.
 // Results are processed in config order (the order of the slice). Deny
 // wins over allow, allow wins over none. Halt is sticky. Reasons and
-// context concatenate in order. updated_input patches shallow-merge in
-// order against the original tool input; later patches override earlier
-// ones on colliding keys.
-func aggregate(results []HookResult, origToolInput string) AggregateResult {
+// context concatenate in order.
+//
+// When replace is true, updated_input uses last-writer-wins replacement
+// semantics (for PostToolUse output replacement). When false,
+// updated_input patches shallow-merge against origToolInput (for
+// PreToolUse input rewriting).
+func aggregate(results []HookResult, origToolInput string, replace bool) AggregateResult {
 	var (
 		decision Decision
 		halt     bool
@@ -126,16 +199,20 @@ func aggregate(results []HookResult, origToolInput string) AggregateResult {
 			contexts = append(contexts, r.Context)
 		}
 		if r.UpdatedInput != "" {
-			next, err := shallowMerge(merged, r.UpdatedInput)
-			if err != nil {
-				slog.Warn(
-					"Hook updated_input patch rejected; ignoring",
-					"error", err,
-					"patch", r.UpdatedInput,
-				)
-				continue
+			if replace {
+				merged = r.UpdatedInput
+			} else {
+				next, err := shallowMerge(merged, r.UpdatedInput)
+				if err != nil {
+					slog.Warn(
+						"Hook updated_input patch rejected; ignoring",
+						"error", err,
+						"patch", r.UpdatedInput,
+					)
+					continue
+				}
+				merged = next
 			}
-			merged = next
 			anyPatch = true
 		}
 	}
