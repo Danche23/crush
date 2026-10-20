@@ -13,8 +13,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// hookedTool wraps a fantasy.AgentTool to run PreToolUse hooks before
-// delegating to the inner tool.
+// hookedTool wraps a fantasy.AgentTool to run PreToolUse hooks before the
+// inner tool and PostToolUse or PostToolUseFailure hooks after it.
 type hookedTool struct {
 	inner  fantasy.AgentTool
 	runner *hooks.Runner
@@ -52,13 +52,15 @@ func (h *hookedTool) SetProviderOptions(opts fantasy.ProviderOptions) {
 }
 
 func (h *hookedTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	pre := h.runner.Run(ctx, hooks.Event{
+	ev := hooks.Event{
 		Name:      hooks.EventPreToolUse,
 		SessionID: tools.GetSessionFromContext(ctx),
 		ToolName:  call.Name,
 		ToolInput: call.Input,
 		ToolUseID: call.ID,
-	})
+	}
+
+	pre := h.runner.Run(ctx, ev)
 	if pre.Blocked() {
 		reason := fmt.Sprintf("Tool call blocked by hook. Reason: %s", pre.Reason)
 		if pre.Halt {
@@ -73,6 +75,7 @@ func (h *hookedTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.To
 	}
 	if pre.UpdatedInput != "" {
 		call.Input = pre.UpdatedInput
+		ev.ToolInput = pre.UpdatedInput
 	}
 	// An explicit allow from a hook pre-approves the permission prompt for
 	// this tool call. Silence falls through to the normal permission flow.
@@ -81,12 +84,41 @@ func (h *hookedTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.To
 	}
 
 	resp, err := h.inner.Run(ctx, call)
-	if err != nil {
+
+	// A Go error or an error response both count as a failure, as in
+	// Claude Code, so PostToolUse only ever sees output the model will
+	// treat as a success.
+	var post hooks.AggregateResult
+	switch {
+	case err != nil:
+		ev.Name = hooks.EventPostToolUseFailure
+		ev.Error = err.Error()
+		h.runner.Run(ctx, ev)
 		return resp, err
+	case resp.IsError:
+		ev.Name = hooks.EventPostToolUseFailure
+		ev.Error = resp.Content
+		post = h.runner.Run(ctx, ev)
+	default:
+		ev.Name = hooks.EventPostToolUse
+		ev.ToolResponse = resp.Content
+		post = h.runner.Run(ctx, ev)
+		if post.UpdatedInput != "" {
+			resp.Content = post.UpdatedInput
+		}
 	}
 
-	resp.Content = joinNonEmpty(resp.Content, pre.Context)
-	resp.Metadata = mergeHookMetadata(resp.Metadata, pre)
+	// A post hook that blocks cannot undo the call, so its reason is
+	// handed to the model as feedback instead, as in Claude Code.
+	feedback := []string{pre.Context, post.Context}
+	if post.Blocked() && post.Reason != "" {
+		feedback = append(feedback, "Hook feedback: "+post.Reason)
+	}
+	resp.Content = joinNonEmpty(resp.Content, feedback...)
+	if post.Halt {
+		resp.StopTurn = true
+	}
+	resp.Metadata = mergeHookMetadata(resp.Metadata, pre, post)
 	return resp, nil
 }
 
